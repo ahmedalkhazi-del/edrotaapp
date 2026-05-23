@@ -1,5 +1,5 @@
-{
-  "name": "rota-app",
+{ 
+"name": "rota-app", 
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -20,4 +20,4 @@
     "@types/react-dom": "^18",
     "typescript": "^5"
   }
-}  
+}
