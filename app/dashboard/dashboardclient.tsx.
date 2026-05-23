@@ -1,0 +1,567 @@
+[2:07 AM, 5/23/2026] احمد الخزي: import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase-server'
+import DashboardClient from './DashboardClient'
+
+export default async function DashboardPage() {
+  const supabase = createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) redirect('/auth/login')
+  const { data: profile } = await supabase
+    .from('profiles').select('*').eq('id', user.id).single()
+  const groupId = profile?.group_id
+  const [membersRes, shiftsRes, tagsRes, swapsRes] = await Promise.all([
+    groupId ? supabase.from('members').select('*').eq('group_id', groupId) : { data: [] },
+    groupId ? supabase.from('shifts').select('*').eq('group_id', groupId) : { data: [] },
+    groupId ? supabase.from('shift_tags').select('*…
+[2:16 AM, 5/23/2026] احمد الخزي: https://claude.ai/public/artifacts/fcd5dc38-aeb3-44a7-8b32-b766533ad03c
+[2:30 AM, 5/23/2026] احمد الخزي: 7cmqs2sgmb@privaterelay.appleid.com
+[6:47 AM, 5/23/2026] احمد الخزي: 'use client'
+import { useState } from 'react'
+import { createClient } from '@/lib/supabase-client'
+
+type Profile = { id: string; email: string; display_name: string; group_id: string | null; role: string; settings: any }
+type Member = { id: string; name: string; email: string | null; team: string | null; profile_id: string | null }
+type ShiftTag = { id: string; code: string; label: string; start_time: string; end_time: string; color: string }
+type Shift = { id: string; member_id: string; shift_date: string; shift_code: string; notes: string | null; shift_tag_id: string | null }
+type SwapRequest = { id: string; requester_member_id: string; target_member_id: string; requester_shift_id: string; target_shift_id: string; status: string; message: string | null; created_at: string }
+
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
+const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+
+function Toast({ msg, onClose }: { msg: string; onClose: () => void }) {
+  return (
+    <div style={{position:'fixed',top:20,right:20,background:'#0f172a',color:'#fff',padding:'12px 20px',borderRadius:12,fontWeight:600,fontSize:14,zIndex:1000,boxShadow:'0 8px 24px rgba(0,0,0,0.3)',display:'flex',gap:12,alignItems:'center'}}>
+      {msg}
+      <span onClick={onClose} style={{cursor:'pointer',opacity:0.6}}>✕</span>
+    </div>
+  )
+}
+
+export default function DashboardClient({ profile, members, shifts, shiftTags, swapRequests }: {
+  profile: Profile | null
+  members: Member[]
+  shifts: Shift[]
+  shiftTags: ShiftTag[]
+  swapRequests: SwapRequest[]
+}) {
+  const supabase = createClient()
+  const [screen, setScreen] = useState<'setup-group'|'setup-type'|'setup-tags'|'setup-input'|'calendar'|'my-shifts'|'swaps'|'settings'|'admin'>(
+    profile?.group_id ? 'calendar' : 'setup-group'
+  )
+  const [toast, setToast] = useState<string|null>(null)
+  const [localMembers, setLocalMembers] = useState<Member[]>(members)
+  const [localShifts, setLocalShifts] = useState<Shift[]>(shifts)
+  const [localTags, setLocalTags] = useState<ShiftTag[]>(shiftTags)
+  const [localSwaps, setLocalSwaps] = useState<SwapRequest[]>(swapRequests)
+  const [currentMonth, setCurrentMonth] = useState(new Date().getMonth())
+  const [currentYear, setCurrentYear] = useState(new Date().getFullYear())
+  const [viewMode, setViewMode] = useState<'full'|'personal'>(profile?.settings?.view || 'full')
+  const [groupId, setGroupId] = useState<string|null>(profile?.group_id || null)
+  const [groupName, setGroupName] = useState('')
+  const [groupPassword, setGroupPassword] = useState('')
+  const [groupPasswordConfirm, setGroupPasswordConfirm] = useState('')
+  const [inputMethod, setInputMethod] = useState<'ai'|'manual'|null>(null)
+  const [tags, setTags] = useState<{code:string;label:string;start:string;end:string;color:string}[]>([
+    {code:'D1',label:'Day 1',start:'06:00',end:'14:00',color:'#f59e0b'},
+    {code:'E1',label:'Evening 1',start:'14:00',end:'22:00',color:'#8b5cf6'},
+    {code:'N1',label:'Night 1',start:'22:00',end:'06:00',color:'#3b82f6'},
+    {code:'S',label:'Standby',start:'00:00',end:'00:00',color:'#64748b'},
+  ])
+  const [newMemberName, setNewMemberName] = useState('')
+  const [newMemberEmail, setNewMemberEmail] = useState('')
+  const [newMemberTeam, setNewMemberTeam] = useState('')
+  const [uploadLoading, setUploadLoading] = useState(false)
+  const [swapModal, setSwapModal] = useState<{myShift: Shift}|null>(null)
+  const [swapTargetMember, setSwapTargetMember] = useState('')
+  const [swapTargetShift, setSwapTargetShift] = useState('')
+  const [swapMessage, setSwapMessage] = useState('')
+  const [editShift, setEditShift] = useState<{memberId:string;date:string;code:string}|null>(null)
+
+  function showToast(msg: string) { setToast(msg); setTimeout(()=>setToast(null), 3500) }
+
+  const myMember = localMembers.find(m => m.profile_id === profile?.id || m.name === profile?.display_name)
+  const isAdmin = profile?.role === 'admin'
+
+  async function signOut() {
+    await supabase.auth.signOut()
+    window.location.href = '/auth/login'
+  }
+  async function createGroup() {
+    if (!groupName.trim()) { showToast('Please enter a group name'); return }
+    if (groupPassword.length < 4) { showToast('Password must be at least 4 characters'); return }
+    if (groupPassword !== groupPasswordConfirm) { showToast('Passwords do not match'); return }
+    const { data: grp, error } = await supabase.from('groups').insert({
+      name: groupName, password_hash: btoa(groupPassword), admin_id: profile?.id
+    }).select().single()
+    if (error) { showToast('Error: ' + error.message); return }
+    await supabase.from('profiles').update({ group_id: grp.id, role: 'admin' }).eq('id', profile?.id)
+    const { data: mem } = await supabase.from('members').insert({
+      group_id: grp.id, name: profile?.display_name, email: profile?.email, profile_id: profile?.id
+    }).select().single()
+    setGroupId(grp.id)
+    if (mem) setLocalMembers([mem])
+    showToast('Group created!')
+    setScreen('setup-type')
+  }
+
+  async function saveTags() {
+    if (!groupId) return
+    const toInsert = tags.map(t => ({ group_id: groupId, code: t.code, label: t.label, start_time: t.start, end_time: t.end, color: t.color }))
+    const { data, error } = await supabase.from('shift_tags').insert(toInsert).select()
+    if (error) { showToast('Error saving tags: ' + error.message); return }
+    setLocalTags(data || [])
+    showToast('Shift tags saved!')
+    setScreen('setup-input')
+  }
+
+  async function addMember() {
+    if (!newMemberName.trim() || !groupId) return
+    const { data, error } = await supabase.from('members').insert({
+      group_id: groupId, name: newMemberName.trim(),
+      email: newMemberEmail.trim() || null, team: newMemberTeam.trim() || null
+    }).select().single()
+    if (error) { showToast('Error: ' + error.message); return }
+    setLocalMembers(prev => [...prev, data])
+    setNewMemberName(''); setNewMemberEmail(''); setNewMemberTeam('')
+    showToast(${data.name} added!)
+  }
+
+  async function handleAIUpload(file: File) {
+    if (!groupId) return
+    setUploadLoading(true)
+    try {
+      const base64 = await new Promise<string>((res, rej) => {
+        const r = new FileReader()
+        r.onload = () => res((r.result as string).split(',')[1])
+        r.onerror = () => rej(new Error('Failed to read file'))
+        r.readAsDataURL(file)
+      })
+      const tagsList = localTags.map(t => ${t.code} = ${t.label} (${t.start_time}-${t.end_time})).join(', ')
+      const memberNames = localMembers.map(m => m.name).join(', ')
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 4000,
+          system: `You are a rota/schedule parser. Extract shift data and return ONLY valid JSON, no markdown.
+Shift tags defined: ${tagsList}
+Members to look for: ${memberNames}
+Return this exact structure:
+{"entries": [{"member_name": "NAME", "date": "YYYY-MM-DD", "shift_code": "CODE"}]}
+Only include entries where you find a clear shift assignment. Use exact member names from the list.`,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: file.
+                if (screen === 'setup-group') return (
+    <div style={{minHeight:'100vh',background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+      {toast && <Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{background:'#1e293b',borderRadius:20,padding:'40px 36px',width:'100%',maxWidth:440}}>
+        <div style={{fontSize:32,marginBottom:8}}>👥</div>
+        <div style={{fontSize:22,fontWeight:900,color:'#f8fafc',marginBottom:4}}>Create your group</div>
+        <div style={{fontSize:13,color:'#64748b',marginBottom:28}}>You'll be the admin. Others join via invitation.</div>
+        <label style={{...s.label,color:'#94a3b8'}}>Group name</label>
+        <input value={groupName} onChange={e=>setGroupName(e.target.value)} placeholder="e.g. ED Adult Unit"
+          style={{...s.inp,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+        <label style={{...s.label,color:'#94a3b8'}}>Admin password</label>
+        <input type="password" value={groupPassword} onChange={e=>setGroupPassword(e.target.value)}
+          placeholder="For editing rights" style={{...s.inp,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+        <label style={{...s.label,color:'#94a3b8'}}>Confirm password</label>
+        <input type="password" value={groupPasswordConfirm} onChange={e=>setGroupPasswordConfirm(e.target.value)}
+          placeholder="Repeat password" style={{...s.inp,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+        <button onClick={createGroup} style={{width:'100%',padding:13,borderRadius:10,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer',marginTop:8}}>
+          Create group →
+        </button>
+      </div>
+    </div>
+  )
+
+  if (screen === 'setup-type') return (
+    <div style={{minHeight:'100vh',background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+      {toast && <Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{background:'#1e293b',borderRadius:20,padding:'40px 36px',width:'100%',maxWidth:500}}>
+        <div style={{fontSize:32,marginBottom:8}}>📅</div>
+        <div style={{fontSize:22,fontWeight:900,color:'#f8fafc',marginBottom:4}}>Add your schedule</div>
+        <div style={{fontSize:13,color:'#64748b',marginBottom:28}}>How would you like to enter the rota?</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:24}}>
+          {[{id:'ai',icon:'🤖',title:'AI Upload',desc:'Upload a PDF or photo — AI extracts the schedule automatically'},{id:'manual',icon:'✏️',title:'Manual Entry',desc:"Enter each person's shifts yourself in a calendar view"}].map(opt => (
+            <div key={opt.id} onClick={()=>setInputMethod(opt.id as any)}
+              style={{background:inputMethod===opt.id?'#1d4ed8':'#0f172a',border:2px solid ${inputMethod===opt.id?'#3b82f6':'#334155'},borderRadius:12,padding:20,cursor:'pointer'}}>
+              <div style={{fontSize:28,marginBottom:8}}>{opt.icon}</div>
+              <div style={{fontWeight:700,color:'#f8fafc',marginBottom:4}}>{opt.title}</div>
+              <div style={{fontSize:12,color:'#94a3b8'}}>{opt.desc}</div>
+            </div>
+          ))}
+        </div>
+        <button onClick={()=>inputMethod&&setScreen('setup-tags')} disabled={!inputMethod}
+          style={{width:'100%',padding:13,borderRadius:10,border:'none',background:inputMethod?'#3b82f6':'#334155',color:'#fff',fontWeight:700,fontSize:15,cursor:inputMethod?'pointer':'default'}}>
+          Next: Define shift codes →
+        </button>
+      </div>
+    </div>
+  )
+
+  if (screen === 'setup-tags') return (
+    <div style={{minHeight:'100vh',background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+      {toast && <Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{background:'#1e293b',borderRadius:20,padding:'40px 36px',width:'100%',maxWidth:600}}>
+        <div style={{fontSize:22,fontWeight:900,color:'#f8fafc',marginBottom:4}}>Define shift codes</div>
+        <div style={{fontSize:13,color:'#64748b',marginBottom:24}}>These are the codes used in your rota. Edit or add your own.</div>
+        {tags.map((tag, i) => (
+          <div key={i} style={{display:'grid',gridTemplateColumns:'80px 1fr 80px 80px 40px',gap:8,marginBottom:8,alignItems:'center'}}>
+            <input value={tag.code} onChange={e=>{const t=[...tags];t[i]={...t[i],code:e.target.value};setTags(t)}} placeholder="Code"
+              style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc',textAlign:'center',fontWeight:700}} />
+            <input value={tag.label} onChange={e=>{const t=[...tags];t[i]={...t[i],label:e.target.value};setTags(t)}} placeholder="Label"
+              style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+            <input value={tag.start} onChange={e=>{const t=[...tags];t[i]={...t[i],start:e.target.value};setTags(t)}} placeholder="Start"
+              style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+            <input value={tag.end} onChange={e=>{const t=[...tags];t[i]={...t[i],end:e.target.value};setTags(t)}} placeholder="End"
+              style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+            <button onClick={()=>setTags(tags.filter((_,j)=>j!==i))} style={{background:'#ef4444',border:'none',borderRadius:6,color:'#fff',padding:'8px',cursor:'pointer',fontWeight:700}}>✕</button>
+          </div>
+        ))}
+        <button onClick={()=>setTags([...tags,{code:'',label:'',start:'',end:'',color:'#3b82f6'}])}
+          style={{background:'#1e293b',border:'1.5px dashed #334155',borderRadius:8,color:'#94a3b8',padding:'8px 16px',cursor:'pointer',width:'100%',marginBottom:20,fontSize:13}}>
+          + Add shift code
+        </button>
+        <button onClick={saveTags} style={{width:'100%',padding:13,borderRadius:10,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
+          Save & continue →
+        </button>
+      </div>
+    </div>
+  )
+
+  if (screen === 'setup-input') return (
+    <div style={{minHeight:'100vh',background:'#0f172a',padding:20}}>
+      {toast && <Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{maxWidth:700,margin:'0 auto'}}>
+        <div style={{background:'#1e293b',borderRadius:20,padding:'32px',marginBottom:20}}>
+          <div style={{fontSize:22,fontWeight:900,color:'#f8fafc',marginBottom:4}}>Add team members</div>
+          <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>Add everyone who appears in the rota.</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 100px 80px',gap:8,marginBottom:16}}>
+            <input value={newMemberName} onChange={e=>setNewMemberName(e.target.value)} placeholder="Full name"
+              style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+            <input value={newMemberEmail} onChange={e=>setNewMemberEmail(e.target.value)} placeholder="Email (optional)"
+              style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+            <input value={newMemberTeam} onChange={e=>setNewMemberTeam(e.target.value)} placeholder="Team"
+              style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
+            <button onClick={addMember} style={{background:'#22c55e',border:'none',borderRadius:8,color:'#fff',fontWeight:700,cursor:'pointer',fontSize:13}}>+ Add</button>
+          </div>
+          {localMembers.length > 0 && (
+            <div style={{background:'#0f172a',borderRadius:10,padding:12}}>
+              {localMembers.map(m => (
+                <div key={m.id} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:'1px solid #1e293b',fontSize:13,color:'#f8fafc'}}>
+                  <span style={{flex:1}}>{m.name}</span>
+                  <span style={{color:'#64748b',fontSize:11}}>{m.team && Team ${m.team}}</span>
+                  <span style={{color:'#64748b',fontSize:11}}>{m.email}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        {inputMethod === 'ai' ? (
+          <div style={{background:'#1e293b',borderRadius:20,padding:32}}>
+            <div style={{fontSize:18,fontWeight:800,color:'#f8fafc',marginBottom:4}}>Upload rota</div>
+            <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>Upload a PDF or image. AI will extract all shifts.</div>
+            <label style={{display:'block',border:'2px dashed #334155',borderRadius:12,padding:32,textAlign:'center',cursor:'pointer',color:'#94a3b8'}}>
+              {uploadLoading ? '⏳ Processing...' : '📄 Click to upload PDF or image'}
+              <input type="file" accept=".pdf,image/*" style={{display:'none'}} onChange={e=>e.target.files?.[0]&&handleAIUpload(e.target.files[0])} />
+            </label>
+          </div>
+        ) : (
+          <div style={{textAlign:'center'}}>
+            <button onClick={()=>setScreen('calendar')} style={{padding:'14px 32px',borderRadius:12,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
+              Go to calendar to enter shifts →
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+               return (
+    <div style={s.page}>
+      {toast && <Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={s.header}>
+        <div>
+          <div style={{fontSize:15,fontWeight:900,color:'#f8fafc'}}>📋 Rota App</div>
+          <div style={{fontSize:11,color:'#64748b'}}>{profile?.display_name}</div>
+        </div>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          {pendingForMe.length > 0 && (
+            <button onClick={()=>setScreen('swaps')} style={{background:'#ef4444',color:'#fff',border:'none',borderRadius:20,padding:'5px 12px',fontSize:12,fontWeight:700,cursor:'pointer'}}>
+              🔔 {pendingForMe.length} swap{pendingForMe.length>1?'s':''}
+            </button>
+          )}
+          <button onClick={signOut} style={{fontSize:12,color:'#64748b',background:'none',border:'1px solid #334155',borderRadius:7,padding:'5px 10px',cursor:'pointer'}}>Sign out</button>
+        </div>
+      </div>
+
+      <div style={{background:'#1e293b',padding:'8px 20px',display:'flex',gap:4,overflowX:'auto'}}>
+        {[['calendar','📅 Calendar'],['my-shifts','👤 My Shifts'],['swaps',🔄 Swaps${pendingForMe.length>0? (${pendingForMe.length}):''}],...(isAdmin?[['admin','⚙️ Admin']]:[]),['settings','🔧 Settings']].map(([v,l]) => (
+          <button key={v} onClick={()=>setScreen(v as any)} style={{...s.btn(screen===v,'#3b82f6'),whiteSpace:'nowrap' as const,fontSize:12}}>{l}</button>
+        ))}
+      </div>
+
+      <div style={{maxWidth:1200,margin:'0 auto',padding:'20px 16px'}}>
+
+        {screen === 'calendar' && (
+          <>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:8}}>
+              <div style={{display:'flex',alignItems:'center',gap:12}}>
+                <button onClick={()=>{if(currentMonth===0){setCurrentMonth(11);setCurrentYear(y=>y-1)}else setCurrentMonth(m=>m-1)}} style={{...s.btn(),padding:'6px 12px'}}>‹</button>
+                <div style={{fontWeight:800,fontSize:18,color:'#0f172a'}}>{MONTHS[currentMonth]} {currentYear}</div>
+                <button onClick={()=>{if(currentMonth===11){setCurrentMonth(0);setCurrentYear(y=>y+1)}else setCurrentMonth(m=>m+1)}} style={{...s.btn(),padding:'6px 12px'}}>›</button>
+              </div>
+              <div style={{display:'flex',gap:8}}>
+                <button onClick={()=>setViewMode(viewMode==='full'?'personal':'full')} style={s.btn(false)}>{viewMode==='full'?'👤 My shifts only':'👥 Full rota'}</button>
+                <button onClick={()=>window.print()} style={s.btn(false)}>🖨️ Print</button>
+              </div>
+            </div>
+            <div style={{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
+              {localTags.map(tag => (
+                <div key={tag.id} style={{background:'#fff',border:2px solid ${tag.color},borderRadius:8,padding:'4px 10px',fontSize:11,fontWeight:700,color:tag.color}}>
+                  {tag.code} · {tag.start_time}–{tag.end_time}
+                </div>
+              ))}
+            </div>
+            {viewMode === 'personal' && myMember ? (
+              <div style={s.card}>
+                <div style={{fontWeight:800,fontSize:16,marginBottom:16}}>{myMember.name} — {MONTHS[currentMonth]} {currentYear}</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4,marginBottom:8}}>
+                  {DAYS.map(d => <div key={d} style={{textAlign:'center',fontSize:11,fontWeight:700,color:'#94a3b8',padding:'4px 0'}}>{d}</div>)}
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4}}>
+                  {Array(firstDay).fill(null).map((_,i) => <div key={e${i}}/>)}
+                  {Array(daysInMonth).fill(null).map((_,i) => {
+                    const day=i+1; const dateStr=formatDate(currentYear,currentMonth,day)
+                    const shift=getShiftForMemberDate(myMember.id,dateStr); const tag=shift?getTagByCode(shift.shift_code):null
+                    const isToday=new Date().toISOString().slice(0,10)===dateStr
+                    return (
+                      <div key={day} style={{minHeight:60,background:isToday?'#eff6ff':'#f8fafc',border:1.5px solid ${isToday?'#3b82f6':'#e2e8f0'},borderRadius:8,padding:6}}>
+                        <div style={{fontSize:11,fontWeight:700,color:isToday?'#1d4ed8':'#94a3b8'}}>{day}</div>
+                        {shift&&tag&&<div style={{background:tag.color,color:'#fff',borderRadius:4,padding:'2px 6px',fontSize:10,fontWeight:800,marginTop:2}}>{shift.shift_code}</div>}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div style={{background:'#fff',borderRadius:14,padding:16,boxShadow:'0 1px 4px rgba(0,0,0,0.08)',overflowX:'auto'}}>
+                <table style={{borderCollapse:'collapse',width:'100%',fontSize:11}}>
+                  <thead>
+                    <tr style={{background:'#f8fafc'}}>
+                      <th style={{padding:'8px 12px',textAlign:'left',fontWeight:700,color:'#475569',position:'sticky',left:0,background:'#f8fafc',minWidth:120}}>Member</th>
+                      {Array(daysInMonth).fill(null).map((_,i) => {
+                        const dateStr=formatDate(currentYear,currentMonth,i+1); const dow=new Date(dateStr).getDay(); const isWe=dow===0||dow===6
+                        return <th key={i} style={{padding:'4px 3px',textAlign:'center',fontWeight:600,color:isWe?'#94a3b8':'#64748b',minWidth:34,background:isWe?'#f1f5f9':'#f8fafc'}}><div style={{fontSize:9}}>{DAYS[dow]}</div><div>{i+1}</div></th>
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {localMembers.map((member,mi) => (
+                      <tr key={member.id} style={{borderBottom:'1px solid #f1f5f9',background:mi%2===0?'#fff':'#fafafa'}}>
+                        <td style={{padding:'6px 12px',fontWeight:700,color:'#0f172a',position:'sticky',left:0,background:mi%2===0?'#fff':'#fafafa',whiteSpace:'nowrap'}}>
+                          {member.name}{member.team&&<span style={{fontSize:9,color:'#94a3b8',marginLeft:4}}>T{member.team}</span>}
+                        </td>
+                        {Array(daysInMonth).fill(null).map((_,di) => {
+                          const dateStr=formatDate(currentYear,currentMonth,di+1); const shift=getShiftForMemberDate(member.id,dateStr); const tag=shift?getTagByCode(shift.shift_code):null
+                          const isToday=new Date().toISOString().slice(0,10)===dateStr
+                          return (
+                            <td key={di} style={{padding:'2px 2px',textAlign:'center',background:isToday?'#eff6ff':undefined}}>
+                              {isAdmin ? (
+                                <div onClick={()=>setEditShift({memberId:member.id,date:dateStr,code:shift?.shift_code||''})}
+                                  style={{minHeight:24,cursor:'pointer',borderRadius:4,background:tag?tag.color:undefined,color:'#fff',fontWeight:800,fontSize:9,display:'flex',alignItems:'center',justifyContent:'center',opacity:tag?1:0.3}}>
+                                  {shift?.shift_code||'+'}
+                                </div>
+                              ) : (
+                                shift&&tag?<span style={{display:'inline-block',background:tag.color,color:'#fff',borderRadius:4,padding:'1px 4px',fontWeight:800,fontSize:9}}>{shift.shift_code}</span>:<span style={{color:'#e2e8f0',fontSize:9}}>·</span>
+                              )}
+                            </td>
+                          )
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+
+        {screen === 'my-shifts' && (
+          <div>
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>👤 My Shifts — {MONTHS[currentMonth]} {currentYear}</div>
+            {!myMember ? <div style={s.card}><div style={{color:'#94a3b8'}}>Your profile hasn't been linked yet. Ask your admin.</div></div> : (
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:10}}>
+                {myShifts.filter(s=>s.shift_date.startsWith(${currentYear}-${String(currentMonth+1).padStart(2,'0')})).map(shift => {
+                  const tag=getTagByCode(shift.shift_code); const date=new Date(shift.shift_date)
+                  return (
+                    <div key={shift.id} style={{background:'#fff',borderRadius:12,padding:14,boxShadow:'0 1px 4px rgba(0,0,0,0.07)',borderLeft:4px solid ${tag?.color||'#e2e8f0'}}}>
+                      <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,marginBottom:6}}>{DAYS[date.getDay()]} · {date.getDate()} {MONTHS[date.getMonth()]}</div>
+                      <div style={{display:'inline-block',background:tag?.color||'#f1f5f9',color:'#fff',borderRadius:6,padding:'3px 10px',fontWeight:800,fontSize:13,marginBottom:6}}>{shift.shift_code}</div>
+                      {tag&&<div style={{fontSize:11,color:'#64748b'}}>{tag.start_time} – {tag.end_time}</div>}
+                      <button onClick={()=>setSwapModal({myShift:shift})} style={{marginTop:10,width:'100%',padding:'6px',borderRadius:7,border:'1.5px solid #e2e8f0',background:'#f8fafc',color:'#475569',fontSize:11,fontWeight:700,cursor:'pointer'}}>🔄 Request swap</button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {screen === 'swaps' && (
+          <div>
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>🔄 Swap Requests</div>
+            {pendingForMe.length > 0 && (
+              <div style={{marginBottom:24}}>
+                <div style={{fontSize:11,fontWeight:800,color:'#ef4444',textTransform:'uppercase',letterSpacing:1,marginBottom:10}}>⚡ Awaiting your response</div>
+                {pendingForMe.map(swap => {
+                  const reqMember=localMembers.find(m=>m.id===swap.requester_member_id)
+                  const reqShift=localShifts.find(s=>s.id===swap.requester_shift_id)
+                  const tgtShift=localShifts.find(s=>s.id===swap.target_shift_id)
+                  return (
+                    <div key={swap.id} style={{...s.card,border:'2px solid #fca5a5'}}>
+                      <div style={{fontWeight:700,fontSize:14,marginBottom:12}}><strong>{reqMember?.name}</strong> wants to swap with you</div>
+                      <div style={{display:'flex',gap:16,fontSize:13,marginBottom:12}}>
+                        <div style={{background:'#f0fdf4',borderRadius:8,padding:'8px 12px',flex:1}}>
+                          <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,marginBottom:3}}>THEY GIVE YOU</div>
+                          <div style={{fontWeight:700}}>{reqShift?.shift_date}</div>
+                          <div style={{fontWeight:800,color:'#166534'}}>{reqShift?.shift_code}</div>
+                        </div>
+                        <div style={{alignSelf:'center',fontSize:20}}>⇄</div>
+                        <div style={{background:'#fef2f2',borderRadius:8,padding:'8px 12px',flex:1}}>
+                          <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,marginBottom:3}}>YOU GIVE THEM</div>
+                          <div style={{fontWeight:700}}>{tgtShift?.shift_date}</div>
+                          <div style={{fontWeight:800,color:'#991b1b'}}>{tgtShift?.shift_code}</div>
+                        </div>
+                      </div>
+                      {swap.message&&<div style={{fontSize:12,color:'#64748b',fontStyle:'italic',marginBottom:12}}>"{swap.message}"</div>}
+                      <div style={{display:'flex',gap:8}}>
+                        <button onClick={()=>respondToSwap(swap.id,true)} style={{flex:1,padding:9,borderRadius:8,border:'none',background:'#22c55e',color:'#fff',fontWeight:700,cursor:'pointer'}}>✓ Accept</button>
+                        <button onClick={()=>respondToSwap(swap.id,false)} style={{flex:1,padding:9,borderRadius:8,border:'none',background:'#ef4444',color:'#fff',fontWeight:700,cursor:'pointer'}}>✗ Decline</button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            {localSwaps.filter(s=>s.requester_member_id===myMember?.id).map(swap => {
+              const tgtMember=localMembers.find(m=>m.id===swap.target_member_id)
+              return (
+                <div key={swap.id} style={{...s.card,opacity:swap.status!=='pending'?0.7:1}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                    <div style={{fontSize:13,fontWeight:700}}>Request to <strong>{tgtMember?.name}</strong></div>
+                    <span style={{fontSize:11,fontWeight:700,borderRadius:6,padding:'3px 9px',background:swap.status==='accepted'?'#f0fdf4':swap.status==='declined'?'#fef2f2':'#fefce8',color:swap.status==='accepted'?'#166534':swap.status==='declined'?'#991b1b':'#92400e'}}>{swap.status.toUpperCase()}</span>
+                  </div>
+                </div>
+              )
+            })}
+            {localSwaps.length===0&&<div style={{...s.card,textAlign:'center',color:'#94a3b8',padding:40}}>No swap requests yet.</div>}
+          </div>
+        )}
+
+        {screen === 'admin' && isAdmin && (
+          <div>
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>⚙️ Admin Panel</div>
+            <div style={s.card}>
+              <div style={{fontWeight:700,fontSize:15,marginBottom:16}}>Add team member</div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 80px',gap:8,marginBottom:8}}>
+                <input value={newMemberName} onChange={e=>setNewMemberName(e.target.value)} placeholder="Full name" style={s.inp}/>
+                <input value={newMemberEmail} onChange={e=>setNewMemberEmail(e.target.value)} placeholder="Email (optional)" style={s.inp}/>
+                <input value={newMemberTeam} onChange={e=>setNewMemberTeam(e.target.value)} placeholder="Team" style={s.inp}/>
+              </div>
+              <button onClick={addMember} style={{...s.btn(true,'#22c55e'),marginBottom:16}}>+ Add member</button>
+              <div style={{fontWeight:700,fontSize:14,marginBottom:8,marginTop:8}}>Current members ({localMembers.length})</div>
+              {localMembers.map(m=>(
+                <div key={m.id} style={{display:'flex',gap:8,padding:'8px 0',borderBottom:'1px solid #f1f5f9',fontSize:13}}>
+                  <span style={{flex:1,fontWeight:600}}>{m.name}</span>
+                  <span style={{color:'#94a3b8'}}>{m.team&&Team ${m.team}}</span>
+                  <span style={{color:'#94a3b8'}}>{m.email}</span>
+                </div>
+              ))}
+            </div>
+            <div style={s.card}>
+              <div style={{fontWeight:700,fontSize:15,marginBottom:16}}>Upload new rota</div>
+              <label style={{display:'block',border:'2px dashed #e2e8f0',borderRadius:10,padding:24,textAlign:'center',cursor:'pointer',color:'#94a3b8'}}>
+                {uploadLoading?'⏳ Processing...':'📄 Upload PDF or image — AI will extract shifts'}
+                <input type="file" accept=".pdf,image/*" style={{display:'none'}} onChange={e=>e.target.files?.[0]&&handleAIUpload(e.target.files[0])}/>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {screen === 'settings' && (
+          <div>
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>🔧 Settings</div>
+            <div style={s.card}>
+              <div style={{fontWeight:700,fontSize:15,marginBottom:16}}>Calendar view</div>
+              <div style={{display:'flex',gap:8}}>
+                {[['full','👥 Full rota'],['personal','👤 My shifts only']].map(([v,l])=>(
+                  <button key={v} onClick={async()=>{setViewMode(v as any);await supabase.from('profiles').update({settings:{view:v}}).eq('id',profile?.id);showToast('Saved!')}} style={s.btn(viewMode===v,'#3b82f6')}>{l}</button>
+                ))}
+              </div>
+            </div>
+            <div style={s.card}>
+              <div style={{fontWeight:700,fontSize:15,marginBottom:8}}>Account</div>
+              <div style={{fontSize:13,color:'#64748b',marginBottom:4}}>Name: <strong>{profile?.display_name}</strong></div>
+              <div style={{fontSize:13,color:'#64748b',marginBottom:16}}>Email: <strong>{profile?.email}</strong></div>
+              <button onClick={signOut} style={{...s.btn(true,'#ef4444')}}>Sign out</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {editShift && (
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:20}}>
+          <div style={{background:'#fff',borderRadius:16,padding:28,width:'100%',maxWidth:360}}>
+            <div style={{fontWeight:900,fontSize:18,marginBottom:4}}>Edit Shift</div>
+            <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>{localMembers.find(m=>m.id===editShift.memberId)?.name} · {editShift.date}</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginBottom:20}}>
+              <button onClick={()=>setEditShift({...editShift,code:''})} style={{...s.btn(!editShift.code,'#94a3b8'),fontSize:12}}>Clear</button>
+              {localTags.map(tag=>(
+                <button key={tag.id} onClick={()=>setEditShift({...editShift,code:tag.code})}
+                  style={{padding:'8px',borderRadius:8,border:2px solid ${editShift.code===tag.code?tag.color:'#e2e8f0'},cursor:'pointer',background:editShift.code===tag.code?tag.color:'#fff',color:editShift.code===tag.code?'#fff':'#475569',fontWeight:700,fontSize:12}}>
+                  {tag.code}
+                </button>
+              ))}
+            </div>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={()=>setEditShift(null)} style={{flex:1,padding:11,borderRadius:9,border:'1.5px solid #e2e8f0',background:'#fff',color:'#475569',fontWeight:700,cursor:'pointer'}}>Cancel</button>
+              <button onClick={saveManualShift} style={{flex:2,padding:11,borderRadius:9,border:'none',background:'#0f172a',color:'#fff',fontWeight:700,cursor:'pointer'}}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {swapModal && (
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:20}}>
+          <div style={{background:'#fff',borderRadius:16,padding:28,width:'100%',maxWidth:420}}>
+            <div style={{fontWeight:900,fontSize:18,marginBottom:4}}>🔄 Request Swap</div>
+            <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>Your shift: <strong>{swapModal.myShift.shift_date}</strong> — <strong>{swapModal.myShift.shift_code}</strong></div>
+            <label style={s.label}>Swap with</label>
+            <select value={swapTargetMember} onChange={e=>{setSwapTargetMember(e.target.value);setSwapTargetShift('')}} style={s.inp}>
+              <option value="">— Select colleague —</option>
+              {localMembers.filter(m=>m.id!==myMember?.id).map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+            {swapTargetMember && (
+              <>
+                <label style={s.label}>Their shift to swap</label>
+                <select value={swapTargetShift} onChange={e=>setSwapTargetShift(e.target.value)} style={s.inp}>
+                  <option value="">— Select their shift —</option>
+                  {localShifts.filter(s=>s.member_id===swapTargetMember).map(s=><option key={s.id} value={s.id}>{s.shift_date} — {s.shift_code}</option>)}
+                </select>
+              </>
+            )}
+            <label style={s.label}>Message (optional)</label>
+            <input value={swapMessage} onChange={e=>setSwapMessage(e.target.value)} placeholder="Reason for swap..." style={s.inp}/>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={()=>setSwapModal(null)} style={{flex:1,padding:11,borderRadius:9,border:'1.5px solid #e2e8f0',background:'#fff',color:'#475569',fontWeight:700,cursor:'pointer'}}>Cancel</button>
+              <button onClick={submitSwap} disabled={!swapTargetShift} style={{flex:2,padding:11,borderRadius:9,border:'none',background:!swapTargetShift?'#e2e8f0':'#0f172a',color:'#fff',fontWeight:700,cursor:swapTargetShift?'pointer':'default'}}>Send request</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
