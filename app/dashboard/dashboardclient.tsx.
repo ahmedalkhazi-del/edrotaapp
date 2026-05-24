@@ -1,21 +1,4 @@
-[2:07 AM, 5/23/2026] احمد الخزي: import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase-server'
-import DashboardClient from './DashboardClient'
-
-export default async function DashboardPage() {
-  const supabase = createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/auth/login')
-  const { data: profile } = await supabase
-    .from('profiles').select('*').eq('id', user.id).single()
-  const groupId = profile?.group_id
-  const [membersRes, shiftsRes, tagsRes, swapsRes] = await Promise.all([
-    groupId ? supabase.from('members').select('*').eq('group_id', groupId) : { data: [] },
-    groupId ? supabase.from('shifts').select('*').eq('group_id', groupId) : { data: [] },
-    groupId ? supabase.from('shift_tags').select('*…
-[2:16 AM, 5/23/2026] احمد الخزي: https://claude.ai/public/artifacts/fcd5dc38-aeb3-44a7-8b32-b766533ad03c
-[2:30 AM, 5/23/2026] احمد الخزي: 7cmqs2sgmb@privaterelay.appleid.com
-[6:47 AM, 5/23/2026] احمد الخزي: 'use client'
+'use client'
 import { useState } from 'react'
 import { createClient } from '@/lib/supabase-client'
 
@@ -78,15 +61,12 @@ export default function DashboardClient({ profile, members, shifts, shiftTags, s
   const [editShift, setEditShift] = useState<{memberId:string;date:string;code:string}|null>(null)
 
   function showToast(msg: string) { setToast(msg); setTimeout(()=>setToast(null), 3500) }
-
   const myMember = localMembers.find(m => m.profile_id === profile?.id || m.name === profile?.display_name)
   const isAdmin = profile?.role === 'admin'
-
   async function signOut() {
     await supabase.auth.signOut()
     window.location.href = '/auth/login'
-  }
-  async function createGroup() {
+async function createGroup() {
     if (!groupName.trim()) { showToast('Please enter a group name'); return }
     if (groupPassword.length < 4) { showToast('Password must be at least 4 characters'); return }
     if (groupPassword !== groupPasswordConfirm) { showToast('Passwords do not match'); return }
@@ -153,14 +133,125 @@ Only include entries where you find a clear shift assignment. Use exact member n
           messages: [{
             role: 'user',
             content: [
-              { type: file.
-                if (screen === 'setup-group') return (
+              { type: file.type === 'application/pdf' ? 'document' : 'image',
+                source: { type: 'base64', media_type: file.type as any, data: base64 } },
+              { type: 'text', text: 'Parse this rota and extract all shift assignments.' }
+            ]
+          }]
+        })
+      })
+      const data = await response.json()
+      const text = data.content.map((b: any) => b.text || '').join('').trim()
+      const clean = text.replace(/^json|^|```$/gm, '').trim()
+      const parsed = JSON.parse(clean)
+      let added = 0
+      for (const entry of parsed.entries) {
+        const member = localMembers.find(m => m.name.toLowerCase() === entry.member_name.toLowerCase())
+        if (!member) continue
+        const tag = localTags.find(t => t.code === entry.shift_code)
+        await supabase.from('shifts').upsert({
+          group_id: groupId, member_id: member.id,
+          shift_date: entry.date, shift_code: entry.shift_code,
+          shift_tag_id: tag?.id || null, created_by: profile?.id
+        }, { onConflict: 'member_id,shift_date' })
+        added++
+      }
+      const { data: newShifts } = await supabase.from('shifts').select('*').eq('group_id', groupId)
+      setLocalShifts(newShifts || [])
+      showToast(Extracted ${added} shifts!)
+      setScreen('calendar')
+    } catch (err: any) {
+      showToast('Error parsing rota: ' + err.message)
+    }
+    setUploadLoading(false)
+  }
+
+  async function saveManualShift() {
+    if (!editShift || !groupId) return
+    const tag = localTags.find(t => t.code === editShift.code)
+    const { data, error } = await supabase.from('shifts').upsert({
+      group_id: groupId, member_id: editShift.memberId,
+      shift_date: editShift.date, shift_code: editShift.code,
+      shift_tag_id: tag?.id || null, created_by: profile?.id
+    }, { onConflict: 'member_id,shift_date' }).select().single()
+    if (error) { showToast('Error: ' + error.message); return }
+    setLocalShifts(prev => {
+      const filtered = prev.filter(s => !(s.member_id === editShift.memberId && s.shift_date === editShift.date))
+      return editShift.code ? [...filtered, data] : filtered
+    })
+    setEditShift(null)
+  }
+
+  async function submitSwap() {
+    if (!swapModal || !groupId) return
+    const targetMember = localMembers.find(m => m.id === swapTargetMember)
+    const targetShift = localShifts.find(s => s.id === swapTargetShift)
+    if (!targetMember || !targetShift) { showToast('Please select a colleague and their shift'); return }
+    const { error } = await supabase.from('swap_requests').insert({
+      group_id: groupId, requester_member_id: myMember?.id,
+      requester_shift_id: swapModal.myShift.id,
+      target_member_id: targetMember.id, target_shift_id: targetShift.id,
+      message: swapMessage, status: 'pending'
+    })
+    if (error) { showToast('Error: ' + error.message); return }
+    showToast('Swap request sent!')
+    setSwapModal(null); setSwapMessage(''); setSwapTargetMember(''); setSwapTargetShift('')
+  }
+
+  async function respondToSwap(swapId: string, accept: boolean) {
+    const swap = localSwaps.find(s => s.id === swapId)
+    if (!swap) return
+    await supabase.from('swap_requests').update({
+      status: accept ? 'accepted' : 'declined',
+      responded_at: new Date().toISOString()
+    }).eq('id', swapId)
+    if (accept) {
+      const reqShift = localShifts.find(s => s.id === swap.requester_shift_id)
+      const tgtShift = localShifts.find(s => s.id === swap.target_shift_id)
+      if (reqShift && tgtShift) {
+        await supabase.from('shifts').update({ shift_code: tgtShift.shift_code, shift_tag_id: tgtShift.shift_tag_id }).eq('id', reqShift.id)
+        await supabase.from('shifts').update({ shift_code: reqShift.shift_code, shift_tag_id: reqShift.shift_tag_id }).eq('id', tgtShift.id)
+        setLocalShifts(prev => prev.map(s => {
+          if (s.id === reqShift.id) return { ...s, shift_code: tgtShift.shift_code }
+          if (s.id === tgtShift.id) return { ...s, shift_code: reqShift.shift_code }
+          return s
+        }))
+      }
+    }
+    setLocalSwaps(prev => prev.map(s => s.id === swapId ? { ...s, status: accept ? 'accepted' : 'declined' } : s))
+    showToast(accept ? 'Swap accepted!' : 'Swap declined.')
+  }
+
+  function getDaysInMonth(year: number, month: number) { return new Date(year, month + 1, 0).getDate() }
+  function getFirstDayOfMonth(year: number, month: number) { return new Date(year, month, 1).getDay() }
+  function getShiftForMemberDate(memberId: string, dateStr: string) { return localShifts.find(s => s.member_id === memberId && s.shift_date === dateStr) }
+  function getTagByCode(code: string) { return localTags.find(t => t.code === code) }
+  function formatDate(year: number, month: number, day: number) { return ${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')} }
+
+  const pendingForMe = localSwaps.filter(s => {
+    const tgtMember = localMembers.find(m => m.id === s.target_member_id)
+    return tgtMember?.profile_id === profile?.id && s.status === 'pending'
+  })
+
+  const daysInMonth = getDaysInMonth(currentYear, currentMonth)
+  const firstDay = getFirstDayOfMonth(currentYear, currentMonth)
+  const myShifts = myMember ? localShifts.filter(s => s.member_id === myMember.id).sort((a,b) => a.shift_date.localeCompare(b.shift_date)) : []
+
+  const s = {
+    page: { minHeight:'100vh', background:'#f1f5f9', fontFamily:"'Segoe UI',system-ui,sans-serif" } as React.CSSProperties,
+    header: { background:'#0f172a', padding:'14px 20px', display:'flex', alignItems:'center', justifyContent:'space-between', position:'sticky' as const, top:0, zIndex:50 } as React.CSSProperties,
+    card: { background:'#fff', borderRadius:14, padding:20, boxShadow:'0 1px 4px rgba(0,0,0,0.08)', marginBottom:16 } as React.CSSProperties,
+    btn: (active=true, color='#0f172a'): React.CSSProperties => ({ padding:'8px 16px', borderRadius:8, border:'none', cursor:'pointer', fontSize:13, fontWeight:700, background:active?color:'#fff', color:active?'#fff':'#64748b', boxShadow:'0 1px 3px rgba(0,0,0,0.08)' }),
+    inp: { width:'100%', padding:'10px 12px', borderRadius:8, border:'1.5px solid #e2e8f0', fontSize:13, outline:'none', marginBottom:12 } as React.CSSProperties,
+    label: { fontSize:11, fontWeight:700, color:'#64748b', textTransform:'uppercase' as const, letterSpacing:1, display:'block', marginBottom:6 },
+  }
+if (screen === 'setup-group') return (
     <div style={{minHeight:'100vh',background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
       {toast && <Toast msg={toast} onClose={()=>setToast(null)}/>}
       <div style={{background:'#1e293b',borderRadius:20,padding:'40px 36px',width:'100%',maxWidth:440}}>
         <div style={{fontSize:32,marginBottom:8}}>👥</div>
         <div style={{fontSize:22,fontWeight:900,color:'#f8fafc',marginBottom:4}}>Create your group</div>
-        <div style={{fontSize:13,color:'#64748b',marginBottom:28}}>You'll be the admin. Others join via invitation.</div>
+        <div style={{fontSize:13,color:'#64748b',marginBottom:28}}>You will be the admin. Others join via invitation.</div>
         <label style={{...s.label,color:'#94a3b8'}}>Group name</label>
         <input value={groupName} onChange={e=>setGroupName(e.target.value)} placeholder="e.g. ED Adult Unit"
           style={{...s.inp,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
@@ -171,7 +262,7 @@ Only include entries where you find a clear shift assignment. Use exact member n
         <input type="password" value={groupPasswordConfirm} onChange={e=>setGroupPasswordConfirm(e.target.value)}
           placeholder="Repeat password" style={{...s.inp,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
         <button onClick={createGroup} style={{width:'100%',padding:13,borderRadius:10,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer',marginTop:8}}>
-          Create group →
+          Create group
         </button>
       </div>
     </div>
@@ -185,7 +276,10 @@ Only include entries where you find a clear shift assignment. Use exact member n
         <div style={{fontSize:22,fontWeight:900,color:'#f8fafc',marginBottom:4}}>Add your schedule</div>
         <div style={{fontSize:13,color:'#64748b',marginBottom:28}}>How would you like to enter the rota?</div>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:24}}>
-          {[{id:'ai',icon:'🤖',title:'AI Upload',desc:'Upload a PDF or photo — AI extracts the schedule automatically'},{id:'manual',icon:'✏️',title:'Manual Entry',desc:"Enter each person's shifts yourself in a calendar view"}].map(opt => (
+          {[
+            {id:'ai',icon:'🤖',title:'AI Upload',desc:'Upload a PDF or photo - AI extracts automatically'},
+            {id:'manual',icon:'✏️',title:'Manual Entry',desc:'Enter shifts yourself in calendar view'}
+          ].map(opt => (
             <div key={opt.id} onClick={()=>setInputMethod(opt.id as any)}
               style={{background:inputMethod===opt.id?'#1d4ed8':'#0f172a',border:2px solid ${inputMethod===opt.id?'#3b82f6':'#334155'},borderRadius:12,padding:20,cursor:'pointer'}}>
               <div style={{fontSize:28,marginBottom:8}}>{opt.icon}</div>
@@ -196,7 +290,7 @@ Only include entries where you find a clear shift assignment. Use exact member n
         </div>
         <button onClick={()=>inputMethod&&setScreen('setup-tags')} disabled={!inputMethod}
           style={{width:'100%',padding:13,borderRadius:10,border:'none',background:inputMethod?'#3b82f6':'#334155',color:'#fff',fontWeight:700,fontSize:15,cursor:inputMethod?'pointer':'default'}}>
-          Next: Define shift codes →
+          Next: Define shift codes
         </button>
       </div>
     </div>
@@ -218,15 +312,17 @@ Only include entries where you find a clear shift assignment. Use exact member n
               style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
             <input value={tag.end} onChange={e=>{const t=[...tags];t[i]={...t[i],end:e.target.value};setTags(t)}} placeholder="End"
               style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
-            <button onClick={()=>setTags(tags.filter((_,j)=>j!==i))} style={{background:'#ef4444',border:'none',borderRadius:6,color:'#fff',padding:'8px',cursor:'pointer',fontWeight:700}}>✕</button>
+            <button onClick={()=>setTags(tags.filter((_,j)=>j!==i))}
+              style={{background:'#ef4444',border:'none',borderRadius:6,color:'#fff',padding:'8px',cursor:'pointer',fontWeight:700}}>X</button>
           </div>
         ))}
         <button onClick={()=>setTags([...tags,{code:'',label:'',start:'',end:'',color:'#3b82f6'}])}
           style={{background:'#1e293b',border:'1.5px dashed #334155',borderRadius:8,color:'#94a3b8',padding:'8px 16px',cursor:'pointer',width:'100%',marginBottom:20,fontSize:13}}>
           + Add shift code
         </button>
-        <button onClick={saveTags} style={{width:'100%',padding:13,borderRadius:10,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
-          Save & continue →
+        <button onClick={saveTags}
+          style={{width:'100%',padding:13,borderRadius:10,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
+          Save and continue
         </button>
       </div>
     </div>
@@ -246,7 +342,10 @@ Only include entries where you find a clear shift assignment. Use exact member n
               style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
             <input value={newMemberTeam} onChange={e=>setNewMemberTeam(e.target.value)} placeholder="Team"
               style={{...s.inp,marginBottom:0,background:'#0f172a',border:'1.5px solid #334155',color:'#f8fafc'}} />
-            <button onClick={addMember} style={{background:'#22c55e',border:'none',borderRadius:8,color:'#fff',fontWeight:700,cursor:'pointer',fontSize:13}}>+ Add</button>
+            <button onClick={addMember}
+              style={{background:'#22c55e',border:'none',borderRadius:8,color:'#fff',fontWeight:700,cursor:'pointer',fontSize:13}}>
+              Add
+            </button>
           </div>
           {localMembers.length > 0 && (
             <div style={{background:'#0f172a',borderRadius:10,padding:12}}>
@@ -265,77 +364,78 @@ Only include entries where you find a clear shift assignment. Use exact member n
             <div style={{fontSize:18,fontWeight:800,color:'#f8fafc',marginBottom:4}}>Upload rota</div>
             <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>Upload a PDF or image. AI will extract all shifts.</div>
             <label style={{display:'block',border:'2px dashed #334155',borderRadius:12,padding:32,textAlign:'center',cursor:'pointer',color:'#94a3b8'}}>
-              {uploadLoading ? '⏳ Processing...' : '📄 Click to upload PDF or image'}
-              <input type="file" accept=".pdf,image/*" style={{display:'none'}} onChange={e=>e.target.files?.[0]&&handleAIUpload(e.target.files[0])} />
+              {uploadLoading ? 'Processing...' : 'Click to upload PDF or image'}
+              <input type="file" accept=".pdf,image/*" style={{display:'none'}}
+                onChange={e=>e.target.files?.[0]&&handleAIUpload(e.target.files[0])} />
             </label>
           </div>
         ) : (
           <div style={{textAlign:'center'}}>
-            <button onClick={()=>setScreen('calendar')} style={{padding:'14px 32px',borderRadius:12,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
-              Go to calendar to enter shifts →
+            <button onClick={()=>setScreen('calendar')}
+              style={{padding:'14px 32px',borderRadius:12,border:'none',background:'#3b82f6',color:'#fff',fontWeight:700,fontSize:15,cursor:'pointer'}}>
+              Go to calendar to enter shifts
             </button>
           </div>
         )}
       </div>
     </div>
   )
-               return (
+return (
     <div style={s.page}>
       {toast && <Toast msg={toast} onClose={()=>setToast(null)}/>}
       <div style={s.header}>
         <div>
-          <div style={{fontSize:15,fontWeight:900,color:'#f8fafc'}}>📋 Rota App</div>
+          <div style={{fontSize:15,fontWeight:900,color:'#f8fafc'}}>Rota App</div>
           <div style={{fontSize:11,color:'#64748b'}}>{profile?.display_name}</div>
         </div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
           {pendingForMe.length > 0 && (
             <button onClick={()=>setScreen('swaps')} style={{background:'#ef4444',color:'#fff',border:'none',borderRadius:20,padding:'5px 12px',fontSize:12,fontWeight:700,cursor:'pointer'}}>
-              🔔 {pendingForMe.length} swap{pendingForMe.length>1?'s':''}
+              {pendingForMe.length} swap{pendingForMe.length>1?'s':''}
             </button>
           )}
           <button onClick={signOut} style={{fontSize:12,color:'#64748b',background:'none',border:'1px solid #334155',borderRadius:7,padding:'5px 10px',cursor:'pointer'}}>Sign out</button>
         </div>
       </div>
-
       <div style={{background:'#1e293b',padding:'8px 20px',display:'flex',gap:4,overflowX:'auto'}}>
-        {[['calendar','📅 Calendar'],['my-shifts','👤 My Shifts'],['swaps',🔄 Swaps${pendingForMe.length>0? (${pendingForMe.length}):''}],...(isAdmin?[['admin','⚙️ Admin']]:[]),['settings','🔧 Settings']].map(([v,l]) => (
+        {[['calendar','Calendar'],['my-shifts','My Shifts'],['swaps',Swaps${pendingForMe.length>0? (${pendingForMe.length}):''}],...(isAdmin?[['admin','Admin']]:[]),['settings','Settings']].map(([v,l]) => (
           <button key={v} onClick={()=>setScreen(v as any)} style={{...s.btn(screen===v,'#3b82f6'),whiteSpace:'nowrap' as const,fontSize:12}}>{l}</button>
         ))}
       </div>
-
       <div style={{maxWidth:1200,margin:'0 auto',padding:'20px 16px'}}>
-
         {screen === 'calendar' && (
           <>
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:8}}>
               <div style={{display:'flex',alignItems:'center',gap:12}}>
-                <button onClick={()=>{if(currentMonth===0){setCurrentMonth(11);setCurrentYear(y=>y-1)}else setCurrentMonth(m=>m-1)}} style={{...s.btn(),padding:'6px 12px'}}>‹</button>
+                <button onClick={()=>{if(currentMonth===0){setCurrentMonth(11);setCurrentYear(y=>y-1)}else setCurrentMonth(m=>m-1)}} style={{...s.btn(),padding:'6px 12px'}}>prev</button>
                 <div style={{fontWeight:800,fontSize:18,color:'#0f172a'}}>{MONTHS[currentMonth]} {currentYear}</div>
-                <button onClick={()=>{if(currentMonth===11){setCurrentMonth(0);setCurrentYear(y=>y+1)}else setCurrentMonth(m=>m+1)}} style={{...s.btn(),padding:'6px 12px'}}>›</button>
+                <button onClick={()=>{if(currentMonth===11){setCurrentMonth(0);setCurrentYear(y=>y+1)}else setCurrentMonth(m=>m+1)}} style={{...s.btn(),padding:'6px 12px'}}>next</button>
               </div>
               <div style={{display:'flex',gap:8}}>
-                <button onClick={()=>setViewMode(viewMode==='full'?'personal':'full')} style={s.btn(false)}>{viewMode==='full'?'👤 My shifts only':'👥 Full rota'}</button>
-                <button onClick={()=>window.print()} style={s.btn(false)}>🖨️ Print</button>
+                <button onClick={()=>setViewMode(viewMode==='full'?'personal':'full')} style={s.btn(false)}>{viewMode==='full'?'My shifts only':'Full rota'}</button>
+                <button onClick={()=>window.print()} style={s.btn(false)}>Print</button>
               </div>
             </div>
             <div style={{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
               {localTags.map(tag => (
                 <div key={tag.id} style={{background:'#fff',border:2px solid ${tag.color},borderRadius:8,padding:'4px 10px',fontSize:11,fontWeight:700,color:tag.color}}>
-                  {tag.code} · {tag.start_time}–{tag.end_time}
+                  {tag.code} {tag.start_time}-{tag.end_time}
                 </div>
               ))}
             </div>
             {viewMode === 'personal' && myMember ? (
               <div style={s.card}>
-                <div style={{fontWeight:800,fontSize:16,marginBottom:16}}>{myMember.name} — {MONTHS[currentMonth]} {currentYear}</div>
+                <div style={{fontWeight:800,fontSize:16,marginBottom:16}}>{myMember.name} - {MONTHS[currentMonth]} {currentYear}</div>
                 <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4,marginBottom:8}}>
                   {DAYS.map(d => <div key={d} style={{textAlign:'center',fontSize:11,fontWeight:700,color:'#94a3b8',padding:'4px 0'}}>{d}</div>)}
                 </div>
                 <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4}}>
                   {Array(firstDay).fill(null).map((_,i) => <div key={e${i}}/>)}
                   {Array(daysInMonth).fill(null).map((_,i) => {
-                    const day=i+1; const dateStr=formatDate(currentYear,currentMonth,day)
-                    const shift=getShiftForMemberDate(myMember.id,dateStr); const tag=shift?getTagByCode(shift.shift_code):null
+                    const day=i+1
+                    const dateStr=formatDate(currentYear,currentMonth,day)
+                    const shift=getShiftForMemberDate(myMember.id,dateStr)
+                    const tag=shift?getTagByCode(shift.shift_code):null
                     const isToday=new Date().toISOString().slice(0,10)===dateStr
                     return (
                       <div key={day} style={{minHeight:60,background:isToday?'#eff6ff':'#f8fafc',border:1.5px solid ${isToday?'#3b82f6':'#e2e8f0'},borderRadius:8,padding:6}}>
@@ -353,7 +453,9 @@ Only include entries where you find a clear shift assignment. Use exact member n
                     <tr style={{background:'#f8fafc'}}>
                       <th style={{padding:'8px 12px',textAlign:'left',fontWeight:700,color:'#475569',position:'sticky',left:0,background:'#f8fafc',minWidth:120}}>Member</th>
                       {Array(daysInMonth).fill(null).map((_,i) => {
-                        const dateStr=formatDate(currentYear,currentMonth,i+1); const dow=new Date(dateStr).getDay(); const isWe=dow===0||dow===6
+                        const dateStr=formatDate(currentYear,currentMonth,i+1)
+                        const dow=new Date(dateStr).getDay()
+                        const isWe=dow===0||dow===6
                         return <th key={i} style={{padding:'4px 3px',textAlign:'center',fontWeight:600,color:isWe?'#94a3b8':'#64748b',minWidth:34,background:isWe?'#f1f5f9':'#f8fafc'}}><div style={{fontSize:9}}>{DAYS[dow]}</div><div>{i+1}</div></th>
                       })}
                     </tr>
@@ -365,7 +467,9 @@ Only include entries where you find a clear shift assignment. Use exact member n
                           {member.name}{member.team&&<span style={{fontSize:9,color:'#94a3b8',marginLeft:4}}>T{member.team}</span>}
                         </td>
                         {Array(daysInMonth).fill(null).map((_,di) => {
-                          const dateStr=formatDate(currentYear,currentMonth,di+1); const shift=getShiftForMemberDate(member.id,dateStr); const tag=shift?getTagByCode(shift.shift_code):null
+                          const dateStr=formatDate(currentYear,currentMonth,di+1)
+                          const shift=getShiftForMemberDate(member.id,dateStr)
+                          const tag=shift?getTagByCode(shift.shift_code):null
                           const isToday=new Date().toISOString().slice(0,10)===dateStr
                           return (
                             <td key={di} style={{padding:'2px 2px',textAlign:'center',background:isToday?'#eff6ff':undefined}}>
@@ -375,7 +479,7 @@ Only include entries where you find a clear shift assignment. Use exact member n
                                   {shift?.shift_code||'+'}
                                 </div>
                               ) : (
-                                shift&&tag?<span style={{display:'inline-block',background:tag.color,color:'#fff',borderRadius:4,padding:'1px 4px',fontWeight:800,fontSize:9}}>{shift.shift_code}</span>:<span style={{color:'#e2e8f0',fontSize:9}}>·</span>
+                                shift&&tag?<span style={{display:'inline-block',background:tag.color,color:'#fff',borderRadius:4,padding:'1px 4px',fontWeight:800,fontSize:9}}>{shift.shift_code}</span>:<span style={{color:'#e2e8f0',fontSize:9}}>.</span>
                               )}
                             </td>
                           )
@@ -388,20 +492,20 @@ Only include entries where you find a clear shift assignment. Use exact member n
             )}
           </>
         )}
-
         {screen === 'my-shifts' && (
           <div>
-            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>👤 My Shifts — {MONTHS[currentMonth]} {currentYear}</div>
-            {!myMember ? <div style={s.card}><div style={{color:'#94a3b8'}}>Your profile hasn't been linked yet. Ask your admin.</div></div> : (
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>My Shifts - {MONTHS[currentMonth]} {currentYear}</div>
+            {!myMember ? <div style={s.card}><div style={{color:'#94a3b8'}}>Your profile has not been linked yet. Ask your admin.</div></div> : (
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:10}}>
-                {myShifts.filter(s=>s.shift_date.startsWith(${currentYear}-${String(currentMonth+1).padStart(2,'0')})).map(shift => {
-                  const tag=getTagByCode(shift.shift_code); const date=new Date(shift.shift_date)
+                {myShifts.filter(sh=>sh.shift_date.startsWith(${currentYear}-${String(currentMonth+1).padStart(2,'0')})).map(shift => {
+                  const tag=getTagByCode(shift.shift_code)
+                  const date=new Date(shift.shift_date)
                   return (
                     <div key={shift.id} style={{background:'#fff',borderRadius:12,padding:14,boxShadow:'0 1px 4px rgba(0,0,0,0.07)',borderLeft:4px solid ${tag?.color||'#e2e8f0'}}}>
-                      <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,marginBottom:6}}>{DAYS[date.getDay()]} · {date.getDate()} {MONTHS[date.getMonth()]}</div>
+                      <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,marginBottom:6}}>{DAYS[date.getDay()]} {date.getDate()} {MONTHS[date.getMonth()]}</div>
                       <div style={{display:'inline-block',background:tag?.color||'#f1f5f9',color:'#fff',borderRadius:6,padding:'3px 10px',fontWeight:800,fontSize:13,marginBottom:6}}>{shift.shift_code}</div>
-                      {tag&&<div style={{fontSize:11,color:'#64748b'}}>{tag.start_time} – {tag.end_time}</div>}
-                      <button onClick={()=>setSwapModal({myShift:shift})} style={{marginTop:10,width:'100%',padding:'6px',borderRadius:7,border:'1.5px solid #e2e8f0',background:'#f8fafc',color:'#475569',fontSize:11,fontWeight:700,cursor:'pointer'}}>🔄 Request swap</button>
+                      {tag&&<div style={{fontSize:11,color:'#64748b'}}>{tag.start_time} - {tag.end_time}</div>}
+                      <button onClick={()=>setSwapModal({myShift:shift})} style={{marginTop:10,width:'100%',padding:'6px',borderRadius:7,border:'1.5px solid #e2e8f0',background:'#f8fafc',color:'#475569',fontSize:11,fontWeight:700,cursor:'pointer'}}>Request swap</button>
                     </div>
                   )
                 })}
@@ -409,49 +513,48 @@ Only include entries where you find a clear shift assignment. Use exact member n
             )}
           </div>
         )}
-
         {screen === 'swaps' && (
           <div>
-            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>🔄 Swap Requests</div>
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>Swap Requests</div>
             {pendingForMe.length > 0 && (
               <div style={{marginBottom:24}}>
-                <div style={{fontSize:11,fontWeight:800,color:'#ef4444',textTransform:'uppercase',letterSpacing:1,marginBottom:10}}>⚡ Awaiting your response</div>
+                <div style={{fontSize:11,fontWeight:800,color:'#ef4444',textTransform:'uppercase',letterSpacing:1,marginBottom:10}}>Awaiting your response</div>
                 {pendingForMe.map(swap => {
                   const reqMember=localMembers.find(m=>m.id===swap.requester_member_id)
-                  const reqShift=localShifts.find(s=>s.id===swap.requester_shift_id)
-                  const tgtShift=localShifts.find(s=>s.id===swap.target_shift_id)
+                  const reqShift=localShifts.find(sh=>sh.id===swap.requester_shift_id)
+                  const tgtShift=localShifts.find(sh=>sh.id===swap.target_shift_id)
                   return (
                     <div key={swap.id} style={{...s.card,border:'2px solid #fca5a5'}}>
-                      <div style={{fontWeight:700,fontSize:14,marginBottom:12}}><strong>{reqMember?.name}</strong> wants to swap with you</div>
+                      <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>{reqMember?.name} wants to swap with you</div>
                       <div style={{display:'flex',gap:16,fontSize:13,marginBottom:12}}>
                         <div style={{background:'#f0fdf4',borderRadius:8,padding:'8px 12px',flex:1}}>
                           <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,marginBottom:3}}>THEY GIVE YOU</div>
                           <div style={{fontWeight:700}}>{reqShift?.shift_date}</div>
                           <div style={{fontWeight:800,color:'#166534'}}>{reqShift?.shift_code}</div>
                         </div>
-                        <div style={{alignSelf:'center',fontSize:20}}>⇄</div>
+                        <div style={{alignSelf:'center',fontSize:20}}>swap</div>
                         <div style={{background:'#fef2f2',borderRadius:8,padding:'8px 12px',flex:1}}>
                           <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,marginBottom:3}}>YOU GIVE THEM</div>
                           <div style={{fontWeight:700}}>{tgtShift?.shift_date}</div>
                           <div style={{fontWeight:800,color:'#991b1b'}}>{tgtShift?.shift_code}</div>
                         </div>
                       </div>
-                      {swap.message&&<div style={{fontSize:12,color:'#64748b',fontStyle:'italic',marginBottom:12}}>"{swap.message}"</div>}
+                      {swap.message&&<div style={{fontSize:12,color:'#64748b',fontStyle:'italic',marginBottom:12}}>{swap.message}</div>}
                       <div style={{display:'flex',gap:8}}>
-                        <button onClick={()=>respondToSwap(swap.id,true)} style={{flex:1,padding:9,borderRadius:8,border:'none',background:'#22c55e',color:'#fff',fontWeight:700,cursor:'pointer'}}>✓ Accept</button>
-                        <button onClick={()=>respondToSwap(swap.id,false)} style={{flex:1,padding:9,borderRadius:8,border:'none',background:'#ef4444',color:'#fff',fontWeight:700,cursor:'pointer'}}>✗ Decline</button>
+                        <button onClick={()=>respondToSwap(swap.id,true)} style={{flex:1,padding:9,borderRadius:8,border:'none',background:'#22c55e',color:'#fff',fontWeight:700,cursor:'pointer'}}>Accept</button>
+                        <button onClick={()=>respondToSwap(swap.id,false)} style={{flex:1,padding:9,borderRadius:8,border:'none',background:'#ef4444',color:'#fff',fontWeight:700,cursor:'pointer'}}>Decline</button>
                       </div>
                     </div>
                   )
                 })}
               </div>
             )}
-            {localSwaps.filter(s=>s.requester_member_id===myMember?.id).map(swap => {
+            {localSwaps.filter(sw=>sw.requester_member_id===myMember?.id).map(swap => {
               const tgtMember=localMembers.find(m=>m.id===swap.target_member_id)
               return (
                 <div key={swap.id} style={{...s.card,opacity:swap.status!=='pending'?0.7:1}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                    <div style={{fontSize:13,fontWeight:700}}>Request to <strong>{tgtMember?.name}</strong></div>
+                    <div style={{fontSize:13,fontWeight:700}}>Request to {tgtMember?.name}</div>
                     <span style={{fontSize:11,fontWeight:700,borderRadius:6,padding:'3px 9px',background:swap.status==='accepted'?'#f0fdf4':swap.status==='declined'?'#fef2f2':'#fefce8',color:swap.status==='accepted'?'#166534':swap.status==='declined'?'#991b1b':'#92400e'}}>{swap.status.toUpperCase()}</span>
                   </div>
                 </div>
@@ -460,10 +563,9 @@ Only include entries where you find a clear shift assignment. Use exact member n
             {localSwaps.length===0&&<div style={{...s.card,textAlign:'center',color:'#94a3b8',padding:40}}>No swap requests yet.</div>}
           </div>
         )}
-
         {screen === 'admin' && isAdmin && (
           <div>
-            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>⚙️ Admin Panel</div>
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>Admin Panel</div>
             <div style={s.card}>
               <div style={{fontWeight:700,fontSize:15,marginBottom:16}}>Add team member</div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 80px',gap:8,marginBottom:8}}>
@@ -471,7 +573,7 @@ Only include entries where you find a clear shift assignment. Use exact member n
                 <input value={newMemberEmail} onChange={e=>setNewMemberEmail(e.target.value)} placeholder="Email (optional)" style={s.inp}/>
                 <input value={newMemberTeam} onChange={e=>setNewMemberTeam(e.target.value)} placeholder="Team" style={s.inp}/>
               </div>
-              <button onClick={addMember} style={{...s.btn(true,'#22c55e'),marginBottom:16}}>+ Add member</button>
+              <button onClick={addMember} style={{...s.btn(true,'#22c55e'),marginBottom:16}}>Add member</button>
               <div style={{fontWeight:700,fontSize:14,marginBottom:8,marginTop:8}}>Current members ({localMembers.length})</div>
               {localMembers.map(m=>(
                 <div key={m.id} style={{display:'flex',gap:8,padding:'8px 0',borderBottom:'1px solid #f1f5f9',fontSize:13}}>
@@ -484,39 +586,37 @@ Only include entries where you find a clear shift assignment. Use exact member n
             <div style={s.card}>
               <div style={{fontWeight:700,fontSize:15,marginBottom:16}}>Upload new rota</div>
               <label style={{display:'block',border:'2px dashed #e2e8f0',borderRadius:10,padding:24,textAlign:'center',cursor:'pointer',color:'#94a3b8'}}>
-                {uploadLoading?'⏳ Processing...':'📄 Upload PDF or image — AI will extract shifts'}
+                {uploadLoading?'Processing...':'Upload PDF or image - AI will extract shifts'}
                 <input type="file" accept=".pdf,image/*" style={{display:'none'}} onChange={e=>e.target.files?.[0]&&handleAIUpload(e.target.files[0])}/>
               </label>
             </div>
           </div>
         )}
-
         {screen === 'settings' && (
           <div>
-            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>🔧 Settings</div>
+            <div style={{fontWeight:800,fontSize:18,color:'#0f172a',marginBottom:16}}>Settings</div>
             <div style={s.card}>
               <div style={{fontWeight:700,fontSize:15,marginBottom:16}}>Calendar view</div>
               <div style={{display:'flex',gap:8}}>
-                {[['full','👥 Full rota'],['personal','👤 My shifts only']].map(([v,l])=>(
+                {[['full','Full rota'],['personal','My shifts only']].map(([v,l])=>(
                   <button key={v} onClick={async()=>{setViewMode(v as any);await supabase.from('profiles').update({settings:{view:v}}).eq('id',profile?.id);showToast('Saved!')}} style={s.btn(viewMode===v,'#3b82f6')}>{l}</button>
                 ))}
               </div>
             </div>
             <div style={s.card}>
               <div style={{fontWeight:700,fontSize:15,marginBottom:8}}>Account</div>
-              <div style={{fontSize:13,color:'#64748b',marginBottom:4}}>Name: <strong>{profile?.display_name}</strong></div>
-              <div style={{fontSize:13,color:'#64748b',marginBottom:16}}>Email: <strong>{profile?.email}</strong></div>
+              <div style={{fontSize:13,color:'#64748b',marginBottom:4}}>Name: {profile?.display_name}</div>
+              <div style={{fontSize:13,color:'#64748b',marginBottom:16}}>Email: {profile?.email}</div>
               <button onClick={signOut} style={{...s.btn(true,'#ef4444')}}>Sign out</button>
             </div>
           </div>
         )}
       </div>
-
       {editShift && (
         <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:20}}>
           <div style={{background:'#fff',borderRadius:16,padding:28,width:'100%',maxWidth:360}}>
             <div style={{fontWeight:900,fontSize:18,marginBottom:4}}>Edit Shift</div>
-            <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>{localMembers.find(m=>m.id===editShift.memberId)?.name} · {editShift.date}</div>
+            <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>{localMembers.find(m=>m.id===editShift.memberId)?.name} - {editShift.date}</div>
             <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginBottom:20}}>
               <button onClick={()=>setEditShift({...editShift,code:''})} style={{...s.btn(!editShift.code,'#94a3b8'),fontSize:12}}>Clear</button>
               {localTags.map(tag=>(
@@ -533,23 +633,22 @@ Only include entries where you find a clear shift assignment. Use exact member n
           </div>
         </div>
       )}
-
       {swapModal && (
         <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:20}}>
           <div style={{background:'#fff',borderRadius:16,padding:28,width:'100%',maxWidth:420}}>
-            <div style={{fontWeight:900,fontSize:18,marginBottom:4}}>🔄 Request Swap</div>
-            <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>Your shift: <strong>{swapModal.myShift.shift_date}</strong> — <strong>{swapModal.myShift.shift_code}</strong></div>
+            <div style={{fontWeight:900,fontSize:18,marginBottom:4}}>Request Swap</div>
+            <div style={{fontSize:13,color:'#64748b',marginBottom:20}}>Your shift: {swapModal.myShift.shift_date} - {swapModal.myShift.shift_code}</div>
             <label style={s.label}>Swap with</label>
             <select value={swapTargetMember} onChange={e=>{setSwapTargetMember(e.target.value);setSwapTargetShift('')}} style={s.inp}>
-              <option value="">— Select colleague —</option>
+              <option value="">Select colleague</option>
               {localMembers.filter(m=>m.id!==myMember?.id).map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
             {swapTargetMember && (
               <>
                 <label style={s.label}>Their shift to swap</label>
                 <select value={swapTargetShift} onChange={e=>setSwapTargetShift(e.target.value)} style={s.inp}>
-                  <option value="">— Select their shift —</option>
-                  {localShifts.filter(s=>s.member_id===swapTargetMember).map(s=><option key={s.id} value={s.id}>{s.shift_date} — {s.shift_code}</option>)}
+                  <option value="">Select their shift</option>
+                  {localShifts.filter(sh=>sh.member_id===swapTargetMember).map(sh=><option key={sh.id} value={sh.id}>{sh.shift_date} - {sh.shift_code}</option>)}
                 </select>
               </>
             )}
