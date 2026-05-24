@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { createClient } from '@/lib/supabase-client'
+import DashboardClient from './dashboardclient'
 
 export default function LoginPage() {
   const [mode, setMode] = useState<'login'|'signup'>('login')
